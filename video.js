@@ -372,10 +372,24 @@ async function startVideoProcessing() {
   videoProgressOverlay.hidden = false;
   videoProgressFill.style.width = '0%';
   videoProgressLabel.textContent = `0:00 / ${formatTime(sourceVideoEl.duration)}`;
+  if (detectedFps > 30) {
+    window.showToast(`Procesando a 30fps (el original va a ${detectedFps}) para mantener buen rendimiento`);
+  }
 
   wakeLockRef = await requestWakeLock();
 
-  const canvasStream = videoCanvas.captureStream(detectedFps);
+  // Running the shader (texture upload + draw) on every single decoded
+  // frame is more GPU throughput than a phone can sustain in real time at
+  // high resolution/frame rate (e.g. 4K60) — when it can't keep up, the
+  // whole pipeline (and the source video's own playback clock along with
+  // it) bogs down, which is what actually produces the "slow motion, very
+  // low fps" result rather than just dropped frames. So cap the frames we
+  // actually *render* at a rate a phone can realistically sustain, and
+  // skip the rest instead of trying (and failing) to process all of them.
+  const renderFps = Math.min(detectedFps, 30);
+  const skipRatio = Math.max(1, Math.round(detectedFps / renderFps));
+
+  const canvasStream = videoCanvas.captureStream(renderFps);
   let audioTracks = [];
   try {
     const sourceStream = sourceVideoEl.captureStream ? sourceVideoEl.captureStream() : sourceVideoEl.mozCaptureStream();
@@ -387,7 +401,7 @@ async function startVideoProcessing() {
 
   const mimeType = pickMimeType();
   resultMimeType = mimeType || 'video/webm';
-  const videoBitsPerSecond = computeBitrate(videoCanvas.width, videoCanvas.height, detectedFps);
+  const videoBitsPerSecond = computeBitrate(videoCanvas.width, videoCanvas.height, renderFps);
   recordedChunks = [];
   try {
     recorder = new MediaRecorder(outStream, mimeType ? { mimeType, videoBitsPerSecond } : { videoBitsPerSecond });
@@ -411,9 +425,11 @@ async function startVideoProcessing() {
 
   recorder.start(1000);
 
+  let frameIndex = 0;
   function step() {
     if (cancelRequested || !sourceVideoEl || sourceVideoEl.paused || sourceVideoEl.ended) return;
-    renderVideoFrame();
+    if (frameIndex % skipRatio === 0) renderVideoFrame();
+    frameIndex++;
     const cur = sourceVideoEl.currentTime;
     const dur = sourceVideoEl.duration || cur;
     videoProgressFill.style.width = `${Math.min(100, (cur / dur) * 100)}%`;
