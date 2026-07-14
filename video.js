@@ -39,7 +39,6 @@ let cancelRequested = false;
 let wakeLockRef = null;
 let videoStage = null; // 'preview' | 'processing' | 'done'
 let rafToken = 0;
-let detectedFps = 30;
 
 const videoLut = { buffer: null, size: 32 };
 
@@ -196,55 +195,12 @@ function pickMimeType() {
 
 // A flat bitrate loses quality on high-resolution source video (a 4K clip
 // can be shot at 25-45 Mbps natively) and wastes bits on small ones, so
-// scale the recording target to the actual pixel throughput instead.
-function computeBitrate(width, height, fps) {
-  const bits = width * height * fps * 0.2;
-  return Math.min(80_000_000, Math.max(6_000_000, Math.round(bits)));
-}
-
-// canvas.captureStream() with no argument samples "on repaint", which is at
-// the mercy of how often our render loop actually manages to redraw — if a
-// frame takes too long on a phone, it's silently dropped and the recording
-// ends up with fewer frames than the source (visible as lost FPS). Passing
-// a fixed rate instead decouples the recording's frame pacing from any
-// rendering jitter. Detect the source's real rate so 60fps clips don't get
-// halved and slow clips don't get padded with duplicate frames.
-async function detectFrameRate(videoEl) {
-  if (!videoEl.requestVideoFrameCallback) return 30;
-  try {
-    await new Promise((resolve, reject) => {
-      videoEl.currentTime = 0;
-      videoEl.onseeked = resolve;
-      videoEl.onerror = reject;
-    });
-    await videoEl.play();
-    const fps = await new Promise((resolve) => {
-      let count = 0;
-      let firstMediaTime = null;
-      const sampleSeconds = 0.4;
-      const giveUpAt = Date.now() + 2000;
-      function onFrame(now, metadata) {
-        if (firstMediaTime === null) firstMediaTime = metadata.mediaTime;
-        count++;
-        const elapsed = metadata.mediaTime - firstMediaTime;
-        if (elapsed < sampleSeconds && !videoEl.ended && Date.now() < giveUpAt) {
-          videoEl.requestVideoFrameCallback(onFrame);
-        } else {
-          resolve(elapsed > 0 ? Math.round((count - 1) / elapsed) : 30);
-        }
-      }
-      videoEl.requestVideoFrameCallback(onFrame);
-    });
-    videoEl.pause();
-    await new Promise((resolve) => {
-      videoEl.onseeked = resolve;
-      videoEl.currentTime = 0;
-    });
-    return Math.min(60, Math.max(24, fps || 30));
-  } catch (err) {
-    console.warn('No se pudo detectar el framerate, usando 30 por defecto', err);
-    return 30;
-  }
+// scale the recording target to the actual pixel throughput instead. Sized
+// against a 60fps assumption so a 4K60 source always gets full headroom,
+// regardless of what frame rate actually ends up being achieved.
+function computeBitrate(width, height) {
+  const bits = width * height * 60 * 0.2;
+  return Math.min(100_000_000, Math.max(6_000_000, Math.round(bits)));
 }
 
 function resetVideoState() {
@@ -347,16 +303,6 @@ async function handleVideoFile(file) {
 
   videoStage = 'preview';
   saveBtnEl.disabled = false;
-
-  // Runs a brief muted scan of the source to measure its real frame rate,
-  // then restores the still first-frame preview. Happens in the background
-  // while the user is looking at the preview / adjusting intensity, so it
-  // doesn't add a visible wait before they can tap "Aplicar filtro".
-  detectedFps = 30;
-  detectFrameRate(sourceVideoEl).then((fps) => {
-    detectedFps = fps;
-    if (videoStage === 'preview') renderVideoFrame();
-  });
 }
 
 intensitySliderEl.addEventListener('input', () => {
@@ -372,24 +318,19 @@ async function startVideoProcessing() {
   videoProgressOverlay.hidden = false;
   videoProgressFill.style.width = '0%';
   videoProgressLabel.textContent = `0:00 / ${formatTime(sourceVideoEl.duration)}`;
-  if (detectedFps > 30) {
-    window.showToast(`Procesando a 30fps (el original va a ${detectedFps}) para mantener buen rendimiento`);
-  }
 
   wakeLockRef = await requestWakeLock();
 
-  // Running the shader (texture upload + draw) on every single decoded
-  // frame is more GPU throughput than a phone can sustain in real time at
-  // high resolution/frame rate (e.g. 4K60) — when it can't keep up, the
-  // whole pipeline (and the source video's own playback clock along with
-  // it) bogs down, which is what actually produces the "slow motion, very
-  // low fps" result rather than just dropped frames. So cap the frames we
-  // actually *render* at a rate a phone can realistically sustain, and
-  // skip the rest instead of trying (and failing) to process all of them.
-  const renderFps = Math.min(detectedFps, 30);
-  const skipRatio = Math.max(1, Math.round(detectedFps / renderFps));
-
-  const canvasStream = videoCanvas.captureStream(renderFps);
+  // Manual capture mode (rate 0): nothing is pushed into the stream
+  // automatically. We push exactly one frame per call to requestFrame(),
+  // made from inside the real-time playback loop below — so every frame in
+  // the output is timestamped at the real moment it was actually produced.
+  // This makes the output's pacing correct by construction, regardless of
+  // guesses about the source's frame rate or how fast this device can
+  // render: if rendering falls behind, frames just get pushed less often,
+  // which can only ever look choppier, never change overall speed/duration.
+  const canvasStream = videoCanvas.captureStream(0);
+  const canvasTrack = canvasStream.getVideoTracks()[0];
   let audioTracks = [];
   try {
     const sourceStream = sourceVideoEl.captureStream ? sourceVideoEl.captureStream() : sourceVideoEl.mozCaptureStream();
@@ -397,11 +338,11 @@ async function startVideoProcessing() {
   } catch (err) {
     console.warn('No se pudo capturar el audio del vídeo', err);
   }
-  const outStream = new MediaStream([...canvasStream.getVideoTracks(), ...audioTracks]);
+  const outStream = new MediaStream([canvasTrack, ...audioTracks]);
 
   const mimeType = pickMimeType();
   resultMimeType = mimeType || 'video/webm';
-  const videoBitsPerSecond = computeBitrate(videoCanvas.width, videoCanvas.height, renderFps);
+  const videoBitsPerSecond = computeBitrate(videoCanvas.width, videoCanvas.height);
   recordedChunks = [];
   try {
     recorder = new MediaRecorder(outStream, mimeType ? { mimeType, videoBitsPerSecond } : { videoBitsPerSecond });
@@ -425,11 +366,21 @@ async function startVideoProcessing() {
 
   recorder.start(1000);
 
-  let frameIndex = 0;
+  // Ceiling only to avoid pointless duplicate work faster than any real
+  // source can present new frames — not a quality cap. If the device can
+  // sustain more, real decoded frames simply won't arrive faster than this
+  // anyway; if it can't sustain even this, frames get pushed less often
+  // (choppier) without affecting the recording's real-time pacing.
+  const minIntervalMs = 1000 / 60;
+  let lastPushTime = 0;
   function step() {
     if (cancelRequested || !sourceVideoEl || sourceVideoEl.paused || sourceVideoEl.ended) return;
-    if (frameIndex % skipRatio === 0) renderVideoFrame();
-    frameIndex++;
+    const now = performance.now();
+    if (now - lastPushTime >= minIntervalMs) {
+      renderVideoFrame();
+      canvasTrack.requestFrame();
+      lastPushTime = now;
+    }
     const cur = sourceVideoEl.currentTime;
     const dur = sourceVideoEl.duration || cur;
     videoProgressFill.style.width = `${Math.min(100, (cur / dur) * 100)}%`;
