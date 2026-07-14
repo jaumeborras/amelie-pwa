@@ -1,4 +1,6 @@
-const CACHE_NAME = 'amelie-pwa-v1';
+// Bump this on every deploy so the browser detects a new service worker
+// (it compares this file byte-for-byte) and refreshes the cached files.
+const CACHE_NAME = 'amelie-pwa-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -25,6 +27,18 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
+// Network-first: while online, always serve the latest file and refresh the
+// cache with it. Only fall back to the cached copy when there's no
+// connection, so the app still works offline.
 self.addEventListener('fetch', (event) => {
-  event.respondWith(caches.match(event.request).then((cached) => cached || fetch(event.request)));
+  if (event.request.method !== 'GET') return;
+  event.respondWith(
+    fetch(event.request)
+      .then((response) => {
+        const copy = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        return response;
+      })
+      .catch(() => caches.match(event.request))
+  );
 });
