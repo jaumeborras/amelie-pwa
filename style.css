@@ -193,6 +193,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  overflow: hidden;
 }
 
 #canvas {
@@ -207,6 +208,52 @@ body {
   position: absolute;
   inset: 0;
   touch-action: none;
+}
+
+.crop-frame {
+  position: absolute;
+  border: 1.5px dashed rgba(255, 255, 255, 0.95);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.2), 0 0 0 2000px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  border-radius: 4px;
+}
+
+.format-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.format-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.format-options {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+}
+
+.format-chip {
+  flex-shrink: 0;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 7px 14px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.format-chip.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
 }
 
 .compare-divider {

@@ -25,6 +25,7 @@ const saveBtnEl = document.getElementById('saveBtn');
 const chooseAnotherBtnEl = document.getElementById('chooseAnotherBtn');
 const intensitySliderEl = document.getElementById('intensitySlider');
 const intensityValueEl = document.getElementById('intensityValue');
+const formatControlEl = document.getElementById('formatControl');
 
 let glCtx = null;
 let glProgram = null;
@@ -393,6 +394,7 @@ async function handleVideoFile(file) {
   videoResultEl.removeAttribute('src');
   videoCanvas.hidden = false;
   toolbarEl.hidden = false;
+  formatControlEl.hidden = true;
   intensitySliderEl.value = 100;
   intensityValueEl.textContent = '100%';
   saveBtnEl.disabled = true;

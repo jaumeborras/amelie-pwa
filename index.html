@@ -66,6 +66,7 @@
             <div class="spinner"></div>
             <span>Aplicando Amelie…</span>
           </div>
+          <div class="crop-frame" id="cropFrame" hidden></div>
           <div class="batch-position" id="batchPosition" hidden></div>
         </div>
         <div class="batch-strip" id="batchStrip" hidden></div>
@@ -73,6 +74,15 @@
     </main>
 
     <footer class="toolbar" id="toolbar" hidden>
+      <div class="format-control" id="formatControl">
+        <span class="format-label">Formato</span>
+        <div class="format-options">
+          <button class="format-chip active" data-format="original">Original</button>
+          <button class="format-chip" data-format="1:1">1:1</button>
+          <button class="format-chip" data-format="4:5">4:5</button>
+          <button class="format-chip" data-format="9:16">9:16</button>
+        </div>
+      </div>
       <div class="intensity-control">
         <span class="intensity-label">Intensidad</span>
         <input type="range" id="intensitySlider" min="0" max="100" value="100" />

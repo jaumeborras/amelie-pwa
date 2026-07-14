@@ -9,6 +9,9 @@ const compareDivider = document.getElementById('compareDivider');
 const processingOverlay = document.getElementById('processingOverlay');
 const batchPosition = document.getElementById('batchPosition');
 const batchStrip = document.getElementById('batchStrip');
+const cropFrame = document.getElementById('cropFrame');
+const formatControl = document.getElementById('formatControl');
+const formatChips = document.querySelectorAll('.format-chip');
 const toolbar = document.getElementById('toolbar');
 const saveBtn = document.getElementById('saveBtn');
 const chooseAnotherBtn = document.getElementById('chooseAnotherBtn');
@@ -34,8 +37,69 @@ const state = {
   compareSplit: 0.5,
   batchItems: [], // { file, name, rowEl, thumbEl, cache: null | { originalImageData, filteredPixels } }
   activeIndex: -1,
+  exportFormat: 'original',
 };
 let loadToken = 0;
+
+const FORMAT_RATIOS = {
+  original: null,
+  '1:1': 1,
+  '4:5': 4 / 5,
+  '9:16': 9 / 16,
+};
+
+// Center-crop rect matching the target aspect ratio (cover-fit: crop the
+// dimension that would otherwise overshoot, keep the other at full size).
+function computeCropRect(width, height, ratio) {
+  if (!ratio) return { x: 0, y: 0, width, height };
+  const srcRatio = width / height;
+  let cropW;
+  let cropH;
+  if (srcRatio > ratio) {
+    cropH = height;
+    cropW = Math.round(height * ratio);
+  } else {
+    cropW = width;
+    cropH = Math.round(width / ratio);
+  }
+  return { x: Math.round((width - cropW) / 2), y: Math.round((height - cropH) / 2), width: cropW, height: cropH };
+}
+
+function cropCanvas(sourceCanvas, ratio) {
+  const rect = computeCropRect(sourceCanvas.width, sourceCanvas.height, ratio);
+  if (rect.width === sourceCanvas.width && rect.height === sourceCanvas.height) return sourceCanvas;
+  const out = document.createElement('canvas');
+  out.width = rect.width;
+  out.height = rect.height;
+  out.getContext('2d').drawImage(sourceCanvas, -rect.x, -rect.y);
+  return out;
+}
+
+function updateCropFrame() {
+  const ratio = FORMAT_RATIOS[state.exportFormat];
+  if (!ratio || !canvas.width || !canvas.height) {
+    cropFrame.hidden = true;
+    return;
+  }
+  const disp = getImageDisplayRect();
+  const rect = computeCropRect(canvas.width, canvas.height, ratio);
+  const scaleX = disp.width / canvas.width;
+  const scaleY = disp.height / canvas.height;
+  cropFrame.style.left = `${disp.x + rect.x * scaleX}px`;
+  cropFrame.style.top = `${disp.y + rect.y * scaleY}px`;
+  cropFrame.style.width = `${rect.width * scaleX}px`;
+  cropFrame.style.height = `${rect.height * scaleY}px`;
+  cropFrame.hidden = false;
+}
+
+formatChips.forEach((btn) => {
+  btn.addEventListener('click', () => {
+    formatChips.forEach((b) => b.classList.remove('active'));
+    btn.classList.add('active');
+    state.exportFormat = btn.dataset.format;
+    updateCropFrame();
+  });
+});
 
 function showToast(message) {
   toast.textContent = message;
@@ -166,6 +230,7 @@ function renderCompare() {
   }
   const disp = getImageDisplayRect();
   compareDivider.style.left = `${disp.x + disp.width * state.compareSplit}px`;
+  updateCropFrame();
 }
 
 function updateCompareSplitFromEvent(e) {
@@ -238,10 +303,12 @@ function resetToEmpty() {
   state.compareSplit = 0.5;
   state.batchItems = [];
   state.activeIndex = -1;
+  state.exportFormat = 'original';
   previewState.hidden = true;
   emptyState.hidden = false;
   toolbar.hidden = true;
   compareOverlay.hidden = true;
+  cropFrame.hidden = true;
   batchStrip.hidden = true;
   batchStrip.innerHTML = '';
   batchPosition.hidden = true;
@@ -250,6 +317,7 @@ function resetToEmpty() {
   intensitySlider.value = 100;
   intensityValue.textContent = '100%';
   fileInput.value = '';
+  formatChips.forEach((b) => b.classList.toggle('active', b.dataset.format === 'original'));
 }
 
 async function handleFiles(fileList) {
@@ -266,6 +334,7 @@ async function handleFiles(fileList) {
   emptyState.hidden = true;
   previewState.hidden = false;
   toolbar.hidden = false;
+  formatControl.hidden = false;
   compareOverlay.hidden = true;
   saveBtn.disabled = true;
   intensitySlider.value = 100;
@@ -441,7 +510,8 @@ async function showBatchItem(index) {
 // --- Save / share ---
 
 async function saveImage() {
-  const blob = await new Promise((resolve) => afterCanvas.toBlob(resolve, 'image/png'));
+  const exportCanvas = cropCanvas(afterCanvas, FORMAT_RATIOS[state.exportFormat]);
+  const blob = await new Promise((resolve) => exportCanvas.toBlob(resolve, 'image/png'));
   if (!blob) {
     showToast('No se pudo generar la imagen');
     return;
@@ -494,7 +564,8 @@ async function saveBatch() {
     outCanvas.width = originalImageData.width;
     outCanvas.height = originalImageData.height;
     outCanvas.getContext('2d').putImageData(new ImageData(blended, outCanvas.width, outCanvas.height), 0, 0);
-    const blob = await new Promise((resolve) => outCanvas.toBlob(resolve, 'image/png'));
+    const exportCanvas = cropCanvas(outCanvas, FORMAT_RATIOS[state.exportFormat]);
+    const blob = await new Promise((resolve) => exportCanvas.toBlob(resolve, 'image/png'));
     if (!blob) continue;
     const baseName = item.name.replace(/\.[^.]+$/, '') || 'foto';
     files.push(new File([blob], `${baseName}_amelie.png`, { type: 'image/png' }));
