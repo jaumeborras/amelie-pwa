@@ -104,6 +104,12 @@ body {
   gap: 10px;
 }
 
+.empty-actions .btn {
+  padding-left: 12px;
+  padding-right: 12px;
+  white-space: nowrap;
+}
+
 .video-state {
   width: 100%;
   height: 100%;
