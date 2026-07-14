@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>Amelie</title>
+<meta name="description" content="Aplica el filtro Amelie a tus fotos" />
+<meta name="theme-color" content="#ffffff" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="Amelie" />
+<link rel="manifest" href="manifest.json" />
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+<link rel="icon" href="icons/favicon-32.png" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <span class="title">Amelie</span>
+      <img src="logo.png" alt="Prinsotel" class="brand-logo" />
+    </header>
+
+    <main id="stage" class="stage">
+      <div class="empty-state" id="emptyState">
+        <div class="drop-icon">
+          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+            <path d="M12 16V4M12 4l-4 4M12 4l4 4" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <p class="empty-title">Elige una foto</p>
+        <p class="empty-subtitle">Se le aplicará el filtro Amelie</p>
+        <button class="btn btn-primary" id="pickBtn">Elegir foto</button>
+        <input type="file" id="fileInput" accept="image/*" hidden />
+      </div>
+
+      <div class="preview-state" id="previewState" hidden>
+        <div class="canvas-wrap" id="canvasWrap">
+          <canvas id="canvas"></canvas>
+          <div class="compare-overlay" id="compareOverlay">
+            <span class="compare-label compare-label-before">Antes</span>
+            <span class="compare-label compare-label-after">Después</span>
+            <div class="compare-divider" id="compareDivider">
+              <div class="compare-grip">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M9 6l-6 6 6 6M15 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </div>
+            </div>
+          </div>
+          <div class="processing-overlay" id="processingOverlay" hidden>
+            <div class="spinner"></div>
+            <span>Aplicando Amelie…</span>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <footer class="toolbar" id="toolbar" hidden>
+      <div class="intensity-control">
+        <span class="intensity-label">Intensidad</span>
+        <input type="range" id="intensitySlider" min="0" max="100" value="100" />
+        <span class="intensity-value" id="intensityValue">100%</span>
+      </div>
+      <div class="actions">
+        <button class="btn btn-secondary" id="chooseAnotherBtn">Otra foto</button>
+        <button class="btn btn-primary" id="saveBtn" disabled>Guardar</button>
+      </div>
+    </footer>
+
+    <div class="toast" id="toast" hidden></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
