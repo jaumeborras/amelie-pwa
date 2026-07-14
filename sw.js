@@ -1,6 +1,6 @@
 // Bump this on every deploy so the browser detects a new service worker
 // (it compares this file byte-for-byte) and refreshes the cached files.
-const CACHE_NAME = 'amelie-pwa-v11';
+const CACHE_NAME = 'amelie-pwa-v12';
 const ASSETS = [
   './',
   './index.html',

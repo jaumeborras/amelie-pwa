@@ -565,4 +565,5 @@ if ('serviceWorker' in navigator) {
   });
 }
 
-initLUT();
+window.getSharedLut = () => (lutBuffer ? { buffer: lutBuffer, size: lutSize } : null);
+window.lutReadyPromise = initLUT();

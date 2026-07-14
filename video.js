@@ -49,6 +49,15 @@ const videoLut = { buffer: null, size: 32 };
 
 async function ensureVideoLutLoaded() {
   if (videoLut.buffer) return;
+  // Reuse app.js's already-proven-reliable fetch/cache instead of racing a
+  // second independent request for the exact same file.
+  if (window.lutReadyPromise) await window.lutReadyPromise;
+  const shared = window.getSharedLut && window.getSharedLut();
+  if (shared) {
+    videoLut.buffer = shared.buffer;
+    videoLut.size = shared.size;
+    return;
+  }
   const res = await fetch('Amelie.cube');
   const text = await res.text();
   const parsed = parseCube(text); // parseCube is defined in app.js
@@ -164,6 +173,7 @@ function setupGL(canvasEl, srcWidth, srcHeight) {
 // into videoCanvas, from which encoded output frames are constructed.
 function renderFilteredFrame(source) {
   const gl = glCtx;
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
   gl.bindTexture(gl.TEXTURE_2D, frameTexture);
   gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, source);
 
@@ -371,7 +381,7 @@ async function handleVideoFile(file) {
     await ensureVideoLutLoaded();
   } catch (err) {
     console.error(err);
-    window.showToast('No se pudo cargar el filtro');
+    window.showToast('No se pudo cargar el filtro: ' + err.message);
     return;
   }
 
@@ -394,7 +404,7 @@ async function handleVideoFile(file) {
     parsedVideo = await demuxFile(file);
   } catch (err) {
     console.error(err);
-    window.showToast('No se pudo leer ese vídeo');
+    window.showToast('No se pudo leer ese vídeo: ' + err.message);
     resetVideoState();
     return;
   }
@@ -414,7 +424,7 @@ async function handleVideoFile(file) {
     setupGL(videoCanvas, parsedVideo.width, parsedVideo.height);
   } catch (err) {
     console.error(err);
-    window.showToast('Este dispositivo no soporta el procesado de vídeo');
+    window.showToast('No se pudo preparar el procesado de vídeo: ' + err.message);
     resetVideoState();
     return;
   }
@@ -434,7 +444,7 @@ async function handleVideoFile(file) {
     });
   } catch (err) {
     console.error(err);
-    window.showToast('No se pudo decodificar ese vídeo en este dispositivo');
+    window.showToast('No se pudo decodificar ese vídeo: ' + (err.message || err));
     resetVideoState();
     return;
   }
