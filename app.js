@@ -18,6 +18,8 @@ const chooseAnotherBtn = document.getElementById('chooseAnotherBtn');
 const intensitySlider = document.getElementById('intensitySlider');
 const intensityValue = document.getElementById('intensityValue');
 const toast = document.getElementById('toast');
+const saveConfirm = document.getElementById('saveConfirm');
+const saveConfirmBadge = saveConfirm.querySelector('.save-confirm-badge');
 
 let lutBuffer = null; // Float32Array
 let lutSize = 32;
@@ -109,6 +111,19 @@ function showToast(message) {
     toast.hidden = true;
   }, 2600);
 }
+
+let saveConfirmTimer = null;
+function showSaveConfirm() {
+  saveConfirm.hidden = false;
+  saveConfirmBadge.style.animation = 'none';
+  void saveConfirmBadge.offsetWidth; // force reflow so the animation restarts every time
+  saveConfirmBadge.style.animation = '';
+  clearTimeout(saveConfirmTimer);
+  saveConfirmTimer = setTimeout(() => {
+    saveConfirm.hidden = true;
+  }, 1000);
+}
+window.showSaveConfirm = showSaveConfirm;
 
 function parseCube(text) {
   const lines = text.split('\n');
@@ -522,6 +537,7 @@ async function saveImage() {
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
     try {
       await navigator.share({ files: [file] });
+      showSaveConfirm();
       return;
     } catch (err) {
       if (err && err.name === 'AbortError') return;
@@ -530,6 +546,7 @@ async function saveImage() {
   }
 
   downloadFile(file);
+  showSaveConfirm();
   showToast('Foto descargada');
 }
 
@@ -581,6 +598,7 @@ async function saveBatch() {
   if (navigator.canShare && navigator.canShare({ files })) {
     try {
       await navigator.share({ files });
+      showSaveConfirm();
       return;
     } catch (err) {
       if (err && err.name === 'AbortError') return;
@@ -591,6 +609,7 @@ async function saveBatch() {
   files.forEach((file, i) => {
     setTimeout(() => downloadFile(file), i * 400);
   });
+  showSaveConfirm();
   showToast(`${files.length} fotos descargadas`);
 }
 

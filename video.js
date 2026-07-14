@@ -612,6 +612,7 @@ async function saveVideoResult() {
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
     try {
       await navigator.share({ files: [file] });
+      if (window.showSaveConfirm) window.showSaveConfirm();
       return;
     } catch (err) {
       if (err && err.name === 'AbortError') return;
@@ -626,6 +627,7 @@ async function saveVideoResult() {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 4000);
+  if (window.showSaveConfirm) window.showSaveConfirm();
   window.showToast('Vídeo descargado');
 }
 
