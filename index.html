@@ -29,10 +29,27 @@
             <path d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </div>
-        <p class="empty-title">Elige una o varias fotos</p>
+        <p class="empty-title">Elige fotos o un vídeo</p>
         <p class="empty-subtitle">Se les aplicará el filtro Amelie</p>
-        <button class="btn btn-primary" id="pickBtn">Elegir fotos</button>
+        <div class="empty-actions">
+          <button class="btn btn-primary" id="pickBtn">Elegir fotos</button>
+          <button class="btn btn-secondary" id="pickVideoBtn">Elegir vídeo</button>
+        </div>
         <input type="file" id="fileInput" accept="image/*" multiple hidden />
+        <input type="file" id="videoInput" accept="video/*" hidden />
+      </div>
+
+      <div class="video-state" id="videoState" hidden>
+        <div class="video-canvas-wrap" id="videoCanvasWrap">
+          <canvas id="videoCanvas"></canvas>
+          <video id="videoResult" class="video-result" controls playsinline hidden></video>
+          <div class="video-progress-overlay" id="videoProgressOverlay" hidden>
+            <div class="spinner"></div>
+            <div class="video-progress-bar"><div class="video-progress-fill" id="videoProgressFill"></div></div>
+            <span id="videoProgressLabel">0:00 / 0:00</span>
+            <button class="btn btn-secondary" id="videoCancelBtn">Cancelar</button>
+          </div>
+        </div>
       </div>
 
       <div class="preview-state" id="previewState" hidden>
@@ -71,5 +88,6 @@
   </div>
 
   <script src="app.js"></script>
+  <script src="video.js"></script>
 </body>
 </html>

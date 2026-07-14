@@ -99,6 +99,76 @@ body {
   color: var(--text-secondary);
 }
 
+.empty-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.video-state {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+  overflow: hidden;
+}
+
+.video-canvas-wrap {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#videoCanvas,
+.video-result {
+  max-width: 100%;
+  max-height: 100%;
+  display: block;
+  border-radius: 14px;
+  background: #000;
+}
+
+.video-progress-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(6px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  border-radius: 14px;
+  padding: 24px;
+}
+
+.video-progress-bar {
+  width: 80%;
+  max-width: 260px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.video-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  width: 0%;
+  transition: width 0.1s linear;
+}
+
+#videoProgressLabel {
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
 .preview-state {
   width: 100%;
   height: 100%;

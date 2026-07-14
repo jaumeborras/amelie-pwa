@@ -231,6 +231,7 @@ function loadImage(file) {
 
 function resetToEmpty() {
   loadToken++;
+  if (window.resetVideoState) window.resetVideoState();
   state.mode = null;
   state.originalImageData = null;
   state.filteredPixels = null;
@@ -542,6 +543,15 @@ fileInput.addEventListener('change', (e) => {
 chooseAnotherBtn.addEventListener('click', resetToEmpty);
 saveBtn.addEventListener('click', () => {
   if (saveBtn.disabled) return;
+  const videoStage = window.getVideoStage && window.getVideoStage();
+  if (videoStage === 'preview') {
+    window.startVideoProcessing();
+    return;
+  }
+  if (videoStage === 'done') {
+    window.saveVideoResult();
+    return;
+  }
   if (state.mode === 'batch') saveBatch();
   else saveImage();
 });
