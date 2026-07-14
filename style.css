@@ -45,6 +45,29 @@ body {
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid var(--border);
+  animation: intro-drop 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes intro-drop {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes intro-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .title {
@@ -70,6 +93,8 @@ body {
   justify-content: center;
   overflow: hidden;
   background: var(--bg);
+  animation: intro-rise 0.55s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation-delay: 0.08s;
 }
 
 .empty-state {
