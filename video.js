@@ -39,6 +39,7 @@ let cancelRequested = false;
 let wakeLockRef = null;
 let videoStage = null; // 'preview' | 'processing' | 'done'
 let rafToken = 0;
+let detectedFps = 30;
 
 const videoLut = { buffer: null, size: 32 };
 
@@ -109,12 +110,16 @@ function setupGL(canvasEl) {
     uIntensity: gl.getUniformLocation(program, 'uIntensity'),
   };
 
+  // Immutable storage allocated once + texSubImage2D per frame is
+  // meaningfully cheaper per-frame than reallocating with texImage2D every
+  // time, which matters for keeping up with real-time video playback.
   frameTexture = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, frameTexture);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, canvasEl.width, canvasEl.height);
 
   const size = videoLut.size;
   const u8 = new Uint8Array(videoLut.buffer.length);
@@ -142,7 +147,7 @@ function renderVideoFrame() {
   const gl = glCtx;
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
   gl.bindTexture(gl.TEXTURE_2D, frameTexture);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sourceVideoEl);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, sourceVideoEl);
 
   gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
   gl.useProgram(glProgram);
@@ -187,6 +192,59 @@ function pickMimeType() {
     'video/webm',
   ];
   return candidates.find((type) => window.MediaRecorder && MediaRecorder.isTypeSupported(type)) || '';
+}
+
+// A flat bitrate loses quality on high-resolution source video (a 4K clip
+// can be shot at 25-45 Mbps natively) and wastes bits on small ones, so
+// scale the recording target to the actual pixel throughput instead.
+function computeBitrate(width, height, fps) {
+  const bits = width * height * fps * 0.2;
+  return Math.min(80_000_000, Math.max(6_000_000, Math.round(bits)));
+}
+
+// canvas.captureStream() with no argument samples "on repaint", which is at
+// the mercy of how often our render loop actually manages to redraw — if a
+// frame takes too long on a phone, it's silently dropped and the recording
+// ends up with fewer frames than the source (visible as lost FPS). Passing
+// a fixed rate instead decouples the recording's frame pacing from any
+// rendering jitter. Detect the source's real rate so 60fps clips don't get
+// halved and slow clips don't get padded with duplicate frames.
+async function detectFrameRate(videoEl) {
+  if (!videoEl.requestVideoFrameCallback) return 30;
+  try {
+    await new Promise((resolve, reject) => {
+      videoEl.currentTime = 0;
+      videoEl.onseeked = resolve;
+      videoEl.onerror = reject;
+    });
+    await videoEl.play();
+    const fps = await new Promise((resolve) => {
+      let count = 0;
+      let firstMediaTime = null;
+      const sampleSeconds = 0.4;
+      const giveUpAt = Date.now() + 2000;
+      function onFrame(now, metadata) {
+        if (firstMediaTime === null) firstMediaTime = metadata.mediaTime;
+        count++;
+        const elapsed = metadata.mediaTime - firstMediaTime;
+        if (elapsed < sampleSeconds && !videoEl.ended && Date.now() < giveUpAt) {
+          videoEl.requestVideoFrameCallback(onFrame);
+        } else {
+          resolve(elapsed > 0 ? Math.round((count - 1) / elapsed) : 30);
+        }
+      }
+      videoEl.requestVideoFrameCallback(onFrame);
+    });
+    videoEl.pause();
+    await new Promise((resolve) => {
+      videoEl.onseeked = resolve;
+      videoEl.currentTime = 0;
+    });
+    return Math.min(60, Math.max(24, fps || 30));
+  } catch (err) {
+    console.warn('No se pudo detectar el framerate, usando 30 por defecto', err);
+    return 30;
+  }
 }
 
 function resetVideoState() {
@@ -289,6 +347,16 @@ async function handleVideoFile(file) {
 
   videoStage = 'preview';
   saveBtnEl.disabled = false;
+
+  // Runs a brief muted scan of the source to measure its real frame rate,
+  // then restores the still first-frame preview. Happens in the background
+  // while the user is looking at the preview / adjusting intensity, so it
+  // doesn't add a visible wait before they can tap "Aplicar filtro".
+  detectedFps = 30;
+  detectFrameRate(sourceVideoEl).then((fps) => {
+    detectedFps = fps;
+    if (videoStage === 'preview') renderVideoFrame();
+  });
 }
 
 intensitySliderEl.addEventListener('input', () => {
@@ -307,7 +375,7 @@ async function startVideoProcessing() {
 
   wakeLockRef = await requestWakeLock();
 
-  const canvasStream = videoCanvas.captureStream();
+  const canvasStream = videoCanvas.captureStream(detectedFps);
   let audioTracks = [];
   try {
     const sourceStream = sourceVideoEl.captureStream ? sourceVideoEl.captureStream() : sourceVideoEl.mozCaptureStream();
@@ -319,9 +387,10 @@ async function startVideoProcessing() {
 
   const mimeType = pickMimeType();
   resultMimeType = mimeType || 'video/webm';
+  const videoBitsPerSecond = computeBitrate(videoCanvas.width, videoCanvas.height, detectedFps);
   recordedChunks = [];
   try {
-    recorder = new MediaRecorder(outStream, mimeType ? { mimeType, videoBitsPerSecond: 8_000_000 } : undefined);
+    recorder = new MediaRecorder(outStream, mimeType ? { mimeType, videoBitsPerSecond } : { videoBitsPerSecond });
   } catch (err) {
     console.error(err);
     window.showToast('No se pudo grabar el vídeo en este dispositivo');
