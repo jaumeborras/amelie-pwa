@@ -29,10 +29,10 @@
             <path d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </div>
-        <p class="empty-title">Elige una foto</p>
-        <p class="empty-subtitle">Se le aplicará el filtro Amelie</p>
-        <button class="btn btn-primary" id="pickBtn">Elegir foto</button>
-        <input type="file" id="fileInput" accept="image/*" hidden />
+        <p class="empty-title">Elige una o varias fotos</p>
+        <p class="empty-subtitle">Se les aplicará el filtro Amelie</p>
+        <button class="btn btn-primary" id="pickBtn">Elegir fotos</button>
+        <input type="file" id="fileInput" accept="image/*" multiple hidden />
       </div>
 
       <div class="preview-state" id="previewState" hidden>
@@ -49,7 +49,9 @@
             <div class="spinner"></div>
             <span>Aplicando Amelie…</span>
           </div>
+          <div class="batch-position" id="batchPosition" hidden></div>
         </div>
+        <div class="batch-strip" id="batchStrip" hidden></div>
       </div>
     </main>
 

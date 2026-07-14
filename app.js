@@ -7,6 +7,8 @@ const ctx = canvas.getContext('2d');
 const compareOverlay = document.getElementById('compareOverlay');
 const compareDivider = document.getElementById('compareDivider');
 const processingOverlay = document.getElementById('processingOverlay');
+const batchPosition = document.getElementById('batchPosition');
+const batchStrip = document.getElementById('batchStrip');
 const toolbar = document.getElementById('toolbar');
 const saveBtn = document.getElementById('saveBtn');
 const chooseAnotherBtn = document.getElementById('chooseAnotherBtn');
@@ -25,11 +27,15 @@ const afterCanvas = document.createElement('canvas');
 const afterCtx = afterCanvas.getContext('2d');
 
 const state = {
+  mode: null, // 'single' | 'batch'
   currentBaseName: 'foto',
   originalImageData: null,
   filteredPixels: null,
   compareSplit: 0.5,
+  batchItems: [], // { file, name, rowEl, thumbEl, cache: null | { originalImageData, filteredPixels } }
+  activeIndex: -1,
 };
+let loadToken = 0;
 
 function showToast(message) {
   toast.textContent = message;
@@ -224,22 +230,31 @@ function loadImage(file) {
 }
 
 function resetToEmpty() {
+  loadToken++;
+  state.mode = null;
   state.originalImageData = null;
   state.filteredPixels = null;
   state.compareSplit = 0.5;
+  state.batchItems = [];
+  state.activeIndex = -1;
   previewState.hidden = true;
   emptyState.hidden = false;
   toolbar.hidden = true;
   compareOverlay.hidden = true;
+  batchStrip.hidden = true;
+  batchStrip.innerHTML = '';
+  batchPosition.hidden = true;
   saveBtn.disabled = true;
+  saveBtn.textContent = 'Guardar';
   intensitySlider.value = 100;
   intensityValue.textContent = '100%';
   fileInput.value = '';
 }
 
-async function handleFile(file) {
-  if (!file || !file.type.startsWith('image/')) {
-    showToast('Elige un archivo de imagen');
+async function handleFiles(fileList) {
+  const files = Array.from(fileList).filter((f) => f.type.startsWith('image/'));
+  if (!files.length) {
+    showToast('Elige uno o varios archivos de imagen');
     return;
   }
   if (!lutBuffer) {
@@ -247,7 +262,6 @@ async function handleFile(file) {
     return;
   }
 
-  state.currentBaseName = file.name.replace(/\.[^.]+$/, '') || 'foto';
   emptyState.hidden = true;
   previewState.hidden = false;
   toolbar.hidden = false;
@@ -255,6 +269,26 @@ async function handleFile(file) {
   saveBtn.disabled = true;
   intensitySlider.value = 100;
   intensityValue.textContent = '100%';
+
+  if (files.length === 1) {
+    state.mode = 'single';
+    state.batchItems = [];
+    batchStrip.hidden = true;
+    batchStrip.innerHTML = '';
+    batchPosition.hidden = true;
+    saveBtn.textContent = 'Guardar';
+    await loadSinglePhoto(files[0]);
+  } else {
+    state.mode = 'batch';
+    saveBtn.textContent = `Guardar ${files.length} fotos`;
+    setupBatchList(files);
+    await showBatchItem(0);
+  }
+}
+
+async function loadSinglePhoto(file) {
+  const myToken = ++loadToken;
+  state.currentBaseName = file.name.replace(/\.[^.]+$/, '') || 'foto';
   processingOverlay.hidden = false;
 
   let loaded;
@@ -265,6 +299,7 @@ async function handleFile(file) {
     showToast('No se pudo abrir esa imagen');
     return;
   }
+  if (myToken !== loadToken) return;
 
   const { img, objectUrl } = loaded;
   canvas.width = img.naturalWidth;
@@ -277,6 +312,7 @@ async function handleFile(file) {
 
   try {
     const filtered = await runLutOnImageData(imageData);
+    if (myToken !== loadToken) return;
     state.filteredPixels = filtered;
     state.compareSplit = 0.5;
     setBeforeImage(imageData);
@@ -290,6 +326,118 @@ async function handleFile(file) {
     showToast('Error al aplicar el filtro');
   }
 }
+
+// --- Batch (multiple photos) ---
+
+function setupBatchList(files) {
+  batchStrip.hidden = false;
+  batchStrip.innerHTML = '';
+  state.batchItems = files.map((file, index) => {
+    const rowEl = document.createElement('div');
+    rowEl.className = 'batch-item';
+    rowEl.dataset.status = 'pending';
+    const thumbEl = document.createElement('canvas');
+    thumbEl.className = 'batch-thumb';
+    thumbEl.width = 112;
+    thumbEl.height = 112;
+    rowEl.appendChild(thumbEl);
+    rowEl.addEventListener('click', () => showBatchItem(index));
+    batchStrip.appendChild(rowEl);
+    return { file, name: file.name, rowEl, thumbEl, cache: null };
+  });
+}
+
+function drawThumb(item) {
+  const { originalImageData, filteredPixels } = item.cache;
+  const src = document.createElement('canvas');
+  src.width = originalImageData.width;
+  src.height = originalImageData.height;
+  src.getContext('2d').putImageData(new ImageData(filteredPixels, src.width, src.height), 0, 0);
+
+  const size = item.thumbEl.width;
+  const scale = Math.max(size / src.width, size / src.height);
+  const dw = src.width * scale;
+  const dh = src.height * scale;
+  const tctx = item.thumbEl.getContext('2d');
+  tctx.clearRect(0, 0, size, size);
+  tctx.drawImage(src, (size - dw) / 2, (size - dh) / 2, dw, dh);
+  item.rowEl.dataset.status = 'done';
+}
+
+function updateBatchPositionUI() {
+  const total = state.batchItems.length;
+  batchPosition.hidden = total === 0;
+  if (!total) return;
+  batchPosition.textContent = `${state.activeIndex + 1} / ${total}`;
+  state.batchItems.forEach((item, i) => item.rowEl.classList.toggle('active', i === state.activeIndex));
+  const activeEl = state.batchItems[state.activeIndex]?.rowEl;
+  if (activeEl) activeEl.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+}
+
+async function showBatchItem(index) {
+  if (index < 0 || index >= state.batchItems.length) return;
+  const myToken = ++loadToken;
+  state.activeIndex = index;
+  updateBatchPositionUI();
+
+  const item = state.batchItems[index];
+  state.currentBaseName = item.name.replace(/\.[^.]+$/, '') || 'foto';
+
+  if (item.cache) {
+    canvas.width = item.cache.originalImageData.width;
+    canvas.height = item.cache.originalImageData.height;
+    state.originalImageData = item.cache.originalImageData;
+    state.filteredPixels = item.cache.filteredPixels;
+    state.compareSplit = 0.5;
+    setBeforeImage(item.cache.originalImageData);
+    updatePreviewIntensity();
+    compareOverlay.hidden = false;
+    saveBtn.disabled = false;
+    return;
+  }
+
+  compareOverlay.hidden = true;
+  processingOverlay.hidden = false;
+
+  let loaded;
+  try {
+    loaded = await loadImage(item.file);
+  } catch (err) {
+    processingOverlay.hidden = true;
+    showToast('No se pudo abrir esa imagen');
+    return;
+  }
+  if (myToken !== loadToken) return;
+
+  const { img, objectUrl } = loaded;
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  ctx.drawImage(img, 0, 0);
+  URL.revokeObjectURL(objectUrl);
+
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+  try {
+    const filtered = await runLutOnImageData(imageData);
+    if (myToken !== loadToken) return;
+    item.cache = { originalImageData: imageData, filteredPixels: filtered };
+    state.originalImageData = imageData;
+    state.filteredPixels = filtered;
+    state.compareSplit = 0.5;
+    setBeforeImage(imageData);
+    updatePreviewIntensity();
+    compareOverlay.hidden = false;
+    processingOverlay.hidden = true;
+    saveBtn.disabled = false;
+    drawThumb(item);
+  } catch (err) {
+    console.error(err);
+    processingOverlay.hidden = true;
+    showToast('Error al aplicar el filtro');
+  }
+}
+
+// --- Save / share ---
 
 async function saveImage() {
   const blob = await new Promise((resolve) => afterCanvas.toBlob(resolve, 'image/png'));
@@ -310,26 +458,92 @@ async function saveImage() {
     }
   }
 
-  const url = URL.createObjectURL(blob);
+  downloadFile(file);
+  showToast('Foto descargada');
+}
+
+async function saveBatch() {
+  saveBtn.disabled = true;
+  const t = currentIntensity();
+  const files = [];
+
+  for (const item of state.batchItems) {
+    if (!item.cache) {
+      try {
+        const { img, objectUrl } = await loadImage(item.file);
+        const off = document.createElement('canvas');
+        off.width = img.naturalWidth;
+        off.height = img.naturalHeight;
+        const offCtx = off.getContext('2d');
+        offCtx.drawImage(img, 0, 0);
+        URL.revokeObjectURL(objectUrl);
+        const imageData = offCtx.getImageData(0, 0, off.width, off.height);
+        const filtered = await runLutOnImageData(imageData);
+        item.cache = { originalImageData: imageData, filteredPixels: filtered };
+        drawThumb(item);
+      } catch (err) {
+        console.error(err);
+        continue;
+      }
+    }
+
+    const { originalImageData, filteredPixels } = item.cache;
+    const blended = blendPixels(originalImageData.data, filteredPixels, t);
+    const outCanvas = document.createElement('canvas');
+    outCanvas.width = originalImageData.width;
+    outCanvas.height = originalImageData.height;
+    outCanvas.getContext('2d').putImageData(new ImageData(blended, outCanvas.width, outCanvas.height), 0, 0);
+    const blob = await new Promise((resolve) => outCanvas.toBlob(resolve, 'image/png'));
+    if (!blob) continue;
+    const baseName = item.name.replace(/\.[^.]+$/, '') || 'foto';
+    files.push(new File([blob], `${baseName}_amelie.png`, { type: 'image/png' }));
+  }
+
+  saveBtn.disabled = false;
+
+  if (!files.length) {
+    showToast('No se pudo generar ninguna imagen');
+    return;
+  }
+
+  if (navigator.canShare && navigator.canShare({ files })) {
+    try {
+      await navigator.share({ files });
+      return;
+    } catch (err) {
+      if (err && err.name === 'AbortError') return;
+      // fall through to the download fallback below
+    }
+  }
+
+  files.forEach((file, i) => {
+    setTimeout(() => downloadFile(file), i * 400);
+  });
+  showToast(`${files.length} fotos descargadas`);
+}
+
+function downloadFile(file) {
+  const url = URL.createObjectURL(file);
   const a = document.createElement('a');
   a.href = url;
-  a.download = fileName;
+  a.download = file.name;
   document.body.appendChild(a);
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 4000);
-  showToast('Foto descargada');
 }
 
 // --- Wiring ---
 
 pickBtn.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', (e) => {
-  if (e.target.files.length) handleFile(e.target.files[0]);
+  if (e.target.files.length) handleFiles(e.target.files);
 });
 chooseAnotherBtn.addEventListener('click', resetToEmpty);
 saveBtn.addEventListener('click', () => {
-  if (!saveBtn.disabled) saveImage();
+  if (saveBtn.disabled) return;
+  if (state.mode === 'batch') saveBatch();
+  else saveImage();
 });
 
 if ('serviceWorker' in navigator) {
