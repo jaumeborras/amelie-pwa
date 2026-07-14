@@ -523,12 +523,12 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  animation: save-confirm-pop 0.7s cubic-bezier(0.16, 1, 0.3, 1);
+  animation: save-confirm-pop 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 @keyframes save-confirm-pop {
-  0% { opacity: 0; transform: translateY(90px) scale(0.55); }
-  45% { opacity: 1; transform: translateY(90px) scale(1.08); }
-  70% { transform: translateY(90px) scale(0.97); }
-  100% { opacity: 1; transform: translateY(90px) scale(1); }
+  0% { opacity: 0; transform: scale(0.55); }
+  45% { opacity: 1; transform: scale(1.08); }
+  70% { transform: scale(0.97); }
+  100% { opacity: 1; transform: scale(1); }
 }
