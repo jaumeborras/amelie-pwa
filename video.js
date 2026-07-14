@@ -262,6 +262,12 @@ async function demuxFile(file) {
   return {
     width: videoTrackInfo.track_width,
     height: videoTrackInfo.track_height,
+    // A portrait phone video is still stored as landscape pixel data — the
+    // track's transformation matrix is what tells a player to rotate it for
+    // display. mp4box.js never bakes that into track_width/track_height, so
+    // it has to be read separately and carried through to the output
+    // untouched, or the result plays back sideways.
+    rotation: matrixToRotation(videoTrackInfo.matrix),
     videoTimescale: videoTrackInfo.timescale,
     decoderConfig: {
       codec: videoTrackInfo.codec,
@@ -274,6 +280,19 @@ async function demuxFile(file) {
     audioTimescale: audioTrackInfo ? audioTrackInfo.timescale : null,
     audioSamples,
   };
+}
+
+// The matrix is a 9-value affine transform (3x3, 16.16 fixed-point for the
+// rotation/scale terms); for the axis-aligned 90°-multiple rotations phones
+// actually use, only the top-left 2x2 block (a, b, c, d) matters.
+function matrixToRotation(matrix) {
+  if (!matrix) return 0;
+  const a = Math.round(matrix[0] / 65536);
+  const b = Math.round(matrix[1] / 65536);
+  if (a === 0 && b === 1) return 90;
+  if (a === -1 && b === 0) return 180;
+  if (a === 0 && b === -1) return 270;
+  return 0;
 }
 
 function sampleToChunk(ChunkType, sample, timescale) {
@@ -426,7 +445,7 @@ async function startVideoProcessing() {
 
   wakeLockRef = await requestWakeLock();
 
-  const { width, height, videoTimescale, decoderConfig, videoSamples, audioTrackInfo, audioTimescale, audioSamples } =
+  const { width, height, rotation, videoTimescale, decoderConfig, videoSamples, audioTrackInfo, audioTimescale, audioSamples } =
     parsedVideo;
 
   let encoderConfig;
@@ -442,7 +461,7 @@ async function startVideoProcessing() {
   const target = new MP4Muxer.ArrayBufferTarget();
   const muxerOptions = {
     target,
-    video: { codec: codecFamily(encoderConfig.codec), width, height },
+    video: { codec: codecFamily(encoderConfig.codec), width, height, rotation },
     fastStart: 'in-memory',
     // B-frame reordering means the first sample's presentation timestamp is
     // often slightly non-zero; let the muxer normalize each track so its
