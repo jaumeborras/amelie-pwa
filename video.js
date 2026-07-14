@@ -40,6 +40,7 @@ let cancelRequested = false;
 let wakeLockRef = null;
 let videoStage = null; // 'preview' | 'processing' | 'done'
 let parsedVideo = null;
+let currentRotation = 0;
 let previewFrame = null; // kept open while in 'preview' so the intensity slider can redraw it
 let activeDecoder = null;
 let activeEncoder = null;
@@ -82,16 +83,31 @@ uniform highp sampler3D uLut;
 uniform float uLutScale;
 uniform float uLutOffset;
 uniform float uIntensity;
+uniform int uRotation;
 in vec2 vUv;
 out vec4 outColor;
 void main() {
-  vec4 src = texture(uFrame, vUv);
+  vec2 suv;
+  if (uRotation == 90) {
+    suv = vec2(1.0 - vUv.y, vUv.x);
+  } else if (uRotation == 180) {
+    suv = vec2(1.0 - vUv.x, 1.0 - vUv.y);
+  } else if (uRotation == 270) {
+    suv = vec2(vUv.y, 1.0 - vUv.x);
+  } else {
+    suv = vUv;
+  }
+  vec4 src = texture(uFrame, suv);
   vec3 lutCoord = src.rgb * uLutScale + uLutOffset;
   vec3 filtered = texture(uLut, lutCoord).rgb;
   outColor = vec4(mix(src.rgb, filtered, uIntensity), src.a);
 }`;
 
-function setupGL(canvasEl) {
+// `srcWidth`/`srcHeight` are the decoder's coded (unrotated) frame size —
+// the frame texture must match that exactly. `canvasEl.width`/`height` is
+// the display/output size, which is swapped from the coded size for a
+// 90°/270° rotation, so the two can differ.
+function setupGL(canvasEl, srcWidth, srcHeight) {
   const gl = canvasEl.getContext('webgl2', { preserveDrawingBuffer: true });
   if (!gl) throw new Error('WebGL2 no disponible');
 
@@ -111,6 +127,7 @@ function setupGL(canvasEl) {
     uLutScale: gl.getUniformLocation(program, 'uLutScale'),
     uLutOffset: gl.getUniformLocation(program, 'uLutOffset'),
     uIntensity: gl.getUniformLocation(program, 'uIntensity'),
+    uRotation: gl.getUniformLocation(program, 'uRotation'),
   };
 
   frameTexture = gl.createTexture();
@@ -119,7 +136,7 @@ function setupGL(canvasEl) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, canvasEl.width, canvasEl.height);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, srcWidth, srcHeight);
 
   const size = videoLut.size;
   const u8 = new Uint8Array(videoLut.buffer.length);
@@ -164,6 +181,7 @@ function renderFilteredFrame(source) {
   gl.uniform1f(glUniforms.uLutScale, lutScale);
   gl.uniform1f(glUniforms.uLutOffset, lutOffset);
   gl.uniform1f(glUniforms.uIntensity, Number(intensitySliderEl.value) / 100);
+  gl.uniform1i(glUniforms.uRotation, currentRotation);
 
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
@@ -387,11 +405,13 @@ async function handleVideoFile(file) {
     return;
   }
 
-  videoCanvas.width = parsedVideo.width;
-  videoCanvas.height = parsedVideo.height;
+  currentRotation = parsedVideo.rotation;
+  const swapped = currentRotation === 90 || currentRotation === 270;
+  videoCanvas.width = swapped ? parsedVideo.height : parsedVideo.width;
+  videoCanvas.height = swapped ? parsedVideo.width : parsedVideo.height;
 
   try {
-    setupGL(videoCanvas);
+    setupGL(videoCanvas, parsedVideo.width, parsedVideo.height);
   } catch (err) {
     console.error(err);
     window.showToast('Este dispositivo no soporta el procesado de vídeo');
@@ -445,8 +465,13 @@ async function startVideoProcessing() {
 
   wakeLockRef = await requestWakeLock();
 
-  const { width, height, rotation, videoTimescale, decoderConfig, videoSamples, audioTrackInfo, audioTimescale, audioSamples } =
-    parsedVideo;
+  const { videoTimescale, decoderConfig, videoSamples, audioTrackInfo, audioTimescale, audioSamples } = parsedVideo;
+  // The shader already rotates pixels into the canvas's (correctly
+  // oriented, possibly width/height-swapped) space, so encode at that size
+  // with no further rotation flag — otherwise a rotation-respecting player
+  // would rotate an already-upright video a second time.
+  const width = videoCanvas.width;
+  const height = videoCanvas.height;
 
   let encoderConfig;
   try {
@@ -461,7 +486,7 @@ async function startVideoProcessing() {
   const target = new MP4Muxer.ArrayBufferTarget();
   const muxerOptions = {
     target,
-    video: { codec: codecFamily(encoderConfig.codec), width, height, rotation },
+    video: { codec: codecFamily(encoderConfig.codec), width, height },
     fastStart: 'in-memory',
     // B-frame reordering means the first sample's presentation timestamp is
     // often slightly non-zero; let the muxer normalize each track so its
