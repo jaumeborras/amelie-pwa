@@ -1,9 +1,13 @@
-// --- Video mode: WebGL LUT engine + real-time capture pipeline ---
-// There is no backend, so the filter is applied by playing the video in
-// real time, redrawing every decoded frame through a GPU shader (fast
-// enough to keep up with playback, unlike the CPU worker used for photos),
-// and recording the result with MediaRecorder. Processing therefore takes
-// roughly as long as the video itself.
+// --- Video mode: WebCodecs decode -> WebGL LUT filter -> encode pipeline ---
+// The earlier approach (play the video in real time, capture the canvas as
+// it plays) can never guarantee more frames than the device can render
+// live, so on demanding footage (4K60) it silently produced fewer frames
+// than the source. WebCodecs decodes/encodes frame-by-frame with no
+// real-time constraint at all: every source frame gets decoded, filtered
+// and re-encoded in order, regardless of how fast that happens to run. No
+// frame can ever be skipped. mp4box.js reads the MP4/MOV container to hand
+// WebCodecs raw encoded samples (it has no decoder of its own), and
+// mp4-muxer writes the filtered frames back into a new MP4 container.
 
 const pickVideoBtn = document.getElementById('pickVideoBtn');
 const videoInput = document.getElementById('videoInput');
@@ -29,16 +33,16 @@ let frameTexture = null;
 let lutTexture = null;
 let lutScale = 1;
 let lutOffset = 0;
-let sourceVideoEl = null;
-let recorder = null;
-let recordedChunks = [];
 let resultBlob = null;
 let resultMimeType = '';
 let resultBaseName = 'video';
 let cancelRequested = false;
 let wakeLockRef = null;
 let videoStage = null; // 'preview' | 'processing' | 'done'
-let rafToken = 0;
+let parsedVideo = null;
+let previewFrame = null; // kept open while in 'preview' so the intensity slider can redraw it
+let activeDecoder = null;
+let activeEncoder = null;
 
 const videoLut = { buffer: null, size: 32 };
 
@@ -109,9 +113,6 @@ function setupGL(canvasEl) {
     uIntensity: gl.getUniformLocation(program, 'uIntensity'),
   };
 
-  // Immutable storage allocated once + texSubImage2D per frame is
-  // meaningfully cheaper per-frame than reallocating with texImage2D every
-  // time, which matters for keeping up with real-time video playback.
   frameTexture = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, frameTexture);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
@@ -142,11 +143,12 @@ function setupGL(canvasEl) {
   glUniforms = uniforms;
 }
 
-function renderVideoFrame() {
+// `source` is a VideoFrame (from the decoder). Draws the filtered result
+// into videoCanvas, from which encoded output frames are constructed.
+function renderFilteredFrame(source) {
   const gl = glCtx;
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
   gl.bindTexture(gl.TEXTURE_2D, frameTexture);
-  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, sourceVideoEl);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, source);
 
   gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
   gl.useProgram(glProgram);
@@ -166,13 +168,6 @@ function renderVideoFrame() {
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
 
-function formatTime(sec) {
-  if (!Number.isFinite(sec)) return '0:00';
-  const m = Math.floor(sec / 60);
-  const s = Math.floor(sec % 60);
-  return `${m}:${String(s).padStart(2, '0')}`;
-}
-
 async function requestWakeLock() {
   try {
     if ('wakeLock' in navigator) return await navigator.wakeLock.request('screen');
@@ -182,51 +177,145 @@ async function requestWakeLock() {
   return null;
 }
 
-function pickMimeType() {
-  const candidates = [
-    'video/mp4;codecs=avc1',
-    'video/mp4',
-    'video/webm;codecs=vp9,opus',
-    'video/webm;codecs=vp8,opus',
-    'video/webm',
-  ];
-  return candidates.find((type) => window.MediaRecorder && MediaRecorder.isTypeSupported(type)) || '';
-}
-
 // A flat bitrate loses quality on high-resolution source video (a 4K clip
 // can be shot at 25-45 Mbps natively) and wastes bits on small ones, so
-// scale the recording target to the actual pixel throughput instead. Sized
-// against a 60fps assumption so a 4K60 source always gets full headroom,
-// regardless of what frame rate actually ends up being achieved.
+// scale the recording target to the actual pixel throughput instead.
 function computeBitrate(width, height) {
   const bits = width * height * 60 * 0.2;
   return Math.min(100_000_000, Math.max(6_000_000, Math.round(bits)));
 }
 
+function codecFamily(codec) {
+  if (codec.startsWith('avc1') || codec.startsWith('avc3')) return 'avc';
+  if (codec.startsWith('hvc1') || codec.startsWith('hev1')) return 'hevc';
+  if (codec.startsWith('vp09')) return 'vp9';
+  if (codec.startsWith('av01')) return 'av1';
+  throw new Error('Códec de vídeo no reconocido: ' + codec);
+}
+
+async function pickVideoEncoderConfig(width, height) {
+  const bitrate = computeBitrate(width, height);
+  const candidates = [
+    'avc1.640034', // H.264 High@5.2 — up to 4096x2304 at high frame rates
+    'avc1.64002A', // H.264 High@4.2
+    'avc1.4D4028', // H.264 Main@4.0
+    'avc1.42E01F', // H.264 Baseline@3.1 — broad-compatibility fallback
+  ];
+  for (const codec of candidates) {
+    const config = { codec, width, height, bitrate, framerate: 60, hardwareAcceleration: 'prefer-hardware' };
+    try {
+      const support = await VideoEncoder.isConfigSupported(config);
+      if (support.supported) return support.config;
+    } catch (err) {
+      /* try next candidate */
+    }
+  }
+  throw new Error('Este dispositivo no soporta codificar vídeo H.264');
+}
+
+// Reads the container (mp4box.js has no decoder — it only parses the box
+// structure) to get the video/audio codec configs and every sample's raw
+// encoded bytes + timestamp, ready to feed into VideoDecoder untouched.
+async function demuxFile(file) {
+  const buffer = await file.arrayBuffer();
+  buffer.fileStart = 0;
+
+  const mp4boxFile = MP4Box.createFile();
+  const videoSamples = [];
+  const audioSamples = [];
+
+  const info = await new Promise((resolve, reject) => {
+    mp4boxFile.onError = (e) => reject(new Error(String(e)));
+    mp4boxFile.onReady = (readyInfo) => {
+      const videoTrackInfo = readyInfo.videoTracks && readyInfo.videoTracks[0];
+      const audioTrackInfo = readyInfo.audioTracks && readyInfo.audioTracks[0];
+      if (!videoTrackInfo) {
+        reject(new Error('El archivo no tiene una pista de vídeo reconocible'));
+        return;
+      }
+      mp4boxFile.setExtractionOptions(videoTrackInfo.id, 'video', { nbSamples: 100000 });
+      if (audioTrackInfo) mp4boxFile.setExtractionOptions(audioTrackInfo.id, 'audio', { nbSamples: 100000 });
+      mp4boxFile.onSamples = (trackId, user, samples) => {
+        if (user === 'video') videoSamples.push(...samples);
+        else if (user === 'audio') audioSamples.push(...samples);
+      };
+      mp4boxFile.start();
+      resolve({ videoTrackInfo, audioTrackInfo });
+    };
+    mp4boxFile.appendBuffer(buffer);
+    mp4boxFile.flush();
+  });
+
+  const { videoTrackInfo, audioTrackInfo } = info;
+  const videoTrak = mp4boxFile.getTrackById(videoTrackInfo.id);
+  const stsdEntry = videoTrak.mdia.minf.stbl.stsd.entries[0];
+  const configBox = stsdEntry.avcC || stsdEntry.hvcC;
+  let description;
+  if (configBox) {
+    // DataStream is a separate global exposed by mp4box.all.min.js, not a
+    // property of the MP4Box object itself.
+    const stream = new DataStream(undefined, 0, DataStream.BIG_ENDIAN);
+    configBox.write(stream);
+    description = new Uint8Array(stream.buffer, 8); // skip the box's own size+type header
+  }
+
+  return {
+    width: videoTrackInfo.track_width,
+    height: videoTrackInfo.track_height,
+    videoTimescale: videoTrackInfo.timescale,
+    decoderConfig: {
+      codec: videoTrackInfo.codec,
+      codedWidth: videoTrackInfo.track_width,
+      codedHeight: videoTrackInfo.track_height,
+      description,
+    },
+    videoSamples,
+    audioTrackInfo,
+    audioTimescale: audioTrackInfo ? audioTrackInfo.timescale : null,
+    audioSamples,
+  };
+}
+
+function sampleToChunk(ChunkType, sample, timescale) {
+  return new ChunkType({
+    type: sample.is_sync ? 'key' : 'delta',
+    timestamp: (sample.cts / timescale) * 1e6,
+    duration: (sample.duration / timescale) * 1e6,
+    data: sample.data,
+  });
+}
+
 function resetVideoState() {
   cancelRequested = true;
-  if (sourceVideoEl) {
-    sourceVideoEl.pause();
-    if (sourceVideoEl.src) URL.revokeObjectURL(sourceVideoEl.src);
-    sourceVideoEl.remove();
-    sourceVideoEl = null;
+  if (previewFrame) {
+    previewFrame.close();
+    previewFrame = null;
   }
+  if (activeDecoder && activeDecoder.state !== 'closed') {
+    try {
+      activeDecoder.close();
+    } catch (err) {
+      /* already closed */
+    }
+  }
+  if (activeEncoder && activeEncoder.state !== 'closed') {
+    try {
+      activeEncoder.close();
+    } catch (err) {
+      /* already closed */
+    }
+  }
+  activeDecoder = null;
+  activeEncoder = null;
+  parsedVideo = null;
   if (videoResultEl.src) {
     URL.revokeObjectURL(videoResultEl.src);
     videoResultEl.removeAttribute('src');
-  }
-  if (recorder && recorder.state !== 'inactive') {
-    try {
-      recorder.stop();
-    } catch (err) {
-      /* already stopped */
-    }
   }
   if (wakeLockRef) {
     wakeLockRef.release().catch(() => {});
     wakeLockRef = null;
   }
-  if (rafToken) cancelAnimationFrame(rafToken);
   resultBlob = null;
   videoStage = null;
   videoState.hidden = true;
@@ -264,27 +353,23 @@ async function handleVideoFile(file) {
   cancelRequested = false;
   videoStage = 'loading';
 
-  const objectUrl = URL.createObjectURL(file);
-  sourceVideoEl = document.createElement('video');
-  sourceVideoEl.src = objectUrl;
-  sourceVideoEl.muted = true;
-  sourceVideoEl.playsInline = true;
-  sourceVideoEl.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;';
-  document.body.appendChild(sourceVideoEl);
-
   try {
-    await new Promise((resolve, reject) => {
-      sourceVideoEl.onloadedmetadata = resolve;
-      sourceVideoEl.onerror = () => reject(new Error('No se pudo abrir el vídeo'));
-    });
+    parsedVideo = await demuxFile(file);
   } catch (err) {
-    window.showToast(err.message);
+    console.error(err);
+    window.showToast('No se pudo leer ese vídeo');
     resetVideoState();
     return;
   }
 
-  videoCanvas.width = sourceVideoEl.videoWidth;
-  videoCanvas.height = sourceVideoEl.videoHeight;
+  if (!parsedVideo.videoSamples.length) {
+    window.showToast('Ese vídeo no tiene fotogramas legibles');
+    resetVideoState();
+    return;
+  }
+
+  videoCanvas.width = parsedVideo.width;
+  videoCanvas.height = parsedVideo.height;
 
   try {
     setupGL(videoCanvas);
@@ -295,126 +380,148 @@ async function handleVideoFile(file) {
     return;
   }
 
-  await new Promise((resolve) => {
-    sourceVideoEl.onseeked = resolve;
-    sourceVideoEl.currentTime = 0;
-  });
-  renderVideoFrame();
+  try {
+    previewFrame = await new Promise((resolve, reject) => {
+      const decoder = new VideoDecoder({
+        output: (frame) => resolve(frame),
+        error: reject,
+      });
+      decoder.configure(parsedVideo.decoderConfig);
+      decoder.decode(sampleToChunk(EncodedVideoChunk, parsedVideo.videoSamples[0], parsedVideo.videoTimescale));
+      // The decoder can buffer frames internally (e.g. for reorder lookahead)
+      // and never call `output` for a lone chunk until told there's no more
+      // input coming — flush() is what forces it to actually deliver.
+      decoder.flush().then(() => decoder.close());
+    });
+  } catch (err) {
+    console.error(err);
+    window.showToast('No se pudo decodificar ese vídeo en este dispositivo');
+    resetVideoState();
+    return;
+  }
 
+  renderFilteredFrame(previewFrame);
   videoStage = 'preview';
   saveBtnEl.disabled = false;
 }
 
 intensitySliderEl.addEventListener('input', () => {
-  if (videoStage === 'preview' && glCtx) renderVideoFrame();
+  if (videoStage === 'preview' && previewFrame) renderFilteredFrame(previewFrame);
 });
 
 async function startVideoProcessing() {
-  if (videoStage !== 'preview') return;
+  if (videoStage !== 'preview' || !parsedVideo) return;
   videoStage = 'processing';
   cancelRequested = false;
   saveBtnEl.disabled = true;
   chooseAnotherBtnEl.disabled = true;
   videoProgressOverlay.hidden = false;
   videoProgressFill.style.width = '0%';
-  videoProgressLabel.textContent = `0:00 / ${formatTime(sourceVideoEl.duration)}`;
+  videoProgressLabel.textContent = `0 / ${parsedVideo.videoSamples.length}`;
+
+  if (previewFrame) {
+    previewFrame.close();
+    previewFrame = null;
+  }
 
   wakeLockRef = await requestWakeLock();
 
-  // Manual capture mode (rate 0): nothing is pushed into the stream
-  // automatically. We push exactly one frame per call to requestFrame(),
-  // made from inside the real-time playback loop below — so every frame in
-  // the output is timestamped at the real moment it was actually produced.
-  // This makes the output's pacing correct by construction, regardless of
-  // guesses about the source's frame rate or how fast this device can
-  // render: if rendering falls behind, frames just get pushed less often,
-  // which can only ever look choppier, never change overall speed/duration.
-  const canvasStream = videoCanvas.captureStream(0);
-  const canvasTrack = canvasStream.getVideoTracks()[0];
-  let audioTracks = [];
-  try {
-    const sourceStream = sourceVideoEl.captureStream ? sourceVideoEl.captureStream() : sourceVideoEl.mozCaptureStream();
-    audioTracks = sourceStream.getAudioTracks();
-  } catch (err) {
-    console.warn('No se pudo capturar el audio del vídeo', err);
-  }
-  const outStream = new MediaStream([canvasTrack, ...audioTracks]);
+  const { width, height, videoTimescale, decoderConfig, videoSamples, audioTrackInfo, audioTimescale, audioSamples } =
+    parsedVideo;
 
-  const mimeType = pickMimeType();
-  resultMimeType = mimeType || 'video/webm';
-  const videoBitsPerSecond = computeBitrate(videoCanvas.width, videoCanvas.height);
-  recordedChunks = [];
+  let encoderConfig;
   try {
-    recorder = new MediaRecorder(outStream, mimeType ? { mimeType, videoBitsPerSecond } : { videoBitsPerSecond });
+    encoderConfig = await pickVideoEncoderConfig(width, height);
   } catch (err) {
     console.error(err);
-    window.showToast('No se pudo grabar el vídeo en este dispositivo');
-    videoStage = 'preview';
-    videoProgressOverlay.hidden = true;
-    chooseAnotherBtnEl.disabled = false;
-    saveBtnEl.disabled = false;
-    if (wakeLockRef) wakeLockRef.release().catch(() => {});
+    window.showToast(err.message);
+    finishProcessingUI(false);
     return;
   }
-  recorder.ondataavailable = (e) => {
-    if (e.data && e.data.size) recordedChunks.push(e.data);
+
+  const target = new MP4Muxer.ArrayBufferTarget();
+  const muxerOptions = {
+    target,
+    video: { codec: codecFamily(encoderConfig.codec), width, height },
+    fastStart: 'in-memory',
+    // B-frame reordering means the first sample's presentation timestamp is
+    // often slightly non-zero; let the muxer normalize each track so its
+    // own first chunk starts at 0 instead of rejecting it.
+    firstTimestampBehavior: 'offset',
   };
+  if (audioTrackInfo) {
+    muxerOptions.audio = {
+      codec: 'aac',
+      numberOfChannels: audioTrackInfo.audio.channel_count,
+      sampleRate: audioTrackInfo.audio.sample_rate,
+    };
+  }
+  const muxer = new MP4Muxer.Muxer(muxerOptions);
 
-  const stopped = new Promise((resolve) => {
-    recorder.onstop = resolve;
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+    error: (err) => console.error('Error del codificador', err),
   });
+  encoder.configure(encoderConfig);
+  activeEncoder = encoder;
 
-  recorder.start(1000);
+  let processed = 0;
+  const total = videoSamples.length;
+  let decodeError = null;
 
-  // Ceiling only to avoid pointless duplicate work faster than any real
-  // source can present new frames — not a quality cap. If the device can
-  // sustain more, real decoded frames simply won't arrive faster than this
-  // anyway; if it can't sustain even this, frames get pushed less often
-  // (choppier) without affecting the recording's real-time pacing.
-  const minIntervalMs = 1000 / 60;
-  let lastPushTime = 0;
-  function step() {
-    if (cancelRequested || !sourceVideoEl || sourceVideoEl.paused || sourceVideoEl.ended) return;
-    const now = performance.now();
-    if (now - lastPushTime >= minIntervalMs) {
-      renderVideoFrame();
-      canvasTrack.requestFrame();
-      lastPushTime = now;
+  const decoder = new VideoDecoder({
+    output: (frame) => {
+      renderFilteredFrame(frame);
+      frame.close();
+      const filteredFrame = new VideoFrame(videoCanvas, { timestamp: frame.timestamp, duration: frame.duration });
+      encoder.encode(filteredFrame);
+      filteredFrame.close();
+      processed++;
+      videoProgressFill.style.width = `${Math.round((processed / total) * 100)}%`;
+      videoProgressLabel.textContent = `${processed} / ${total}`;
+    },
+    error: (err) => {
+      decodeError = err;
+      console.error('Error del decodificador', err);
+    },
+  });
+  decoder.configure(decoderConfig);
+  activeDecoder = decoder;
+
+  for (const sample of videoSamples) {
+    if (cancelRequested || decodeError) break;
+    if (decoder.decodeQueueSize > 8) {
+      await new Promise((resolve) => decoder.addEventListener('dequeue', resolve, { once: true }));
     }
-    const cur = sourceVideoEl.currentTime;
-    const dur = sourceVideoEl.duration || cur;
-    videoProgressFill.style.width = `${Math.min(100, (cur / dur) * 100)}%`;
-    videoProgressLabel.textContent = `${formatTime(cur)} / ${formatTime(dur)}`;
-    if (sourceVideoEl.requestVideoFrameCallback) {
-      sourceVideoEl.requestVideoFrameCallback(step);
-    } else {
-      rafToken = requestAnimationFrame(step);
+    decoder.decode(sampleToChunk(EncodedVideoChunk, sample, videoTimescale));
+  }
+
+  if (!cancelRequested && !decodeError) {
+    await decoder.flush();
+    await encoder.flush();
+  }
+  if (decoder.state !== 'closed') decoder.close();
+  if (encoder.state !== 'closed') encoder.close();
+  activeDecoder = null;
+  activeEncoder = null;
+
+  if (decodeError) {
+    window.showToast('No se pudo decodificar ese vídeo en este dispositivo');
+    finishProcessingUI(false);
+    return;
+  }
+
+  if (!cancelRequested && audioTrackInfo) {
+    for (const sample of audioSamples) {
+      const chunk = sampleToChunk(EncodedAudioChunk, sample, audioTimescale);
+      muxer.addAudioChunk(chunk);
     }
   }
 
-  await new Promise((resolve) => {
-    sourceVideoEl.onseeked = resolve;
-    sourceVideoEl.currentTime = 0;
-  });
-  if (sourceVideoEl.requestVideoFrameCallback) {
-    sourceVideoEl.requestVideoFrameCallback(step);
-  } else {
-    rafToken = requestAnimationFrame(step);
-  }
-  await sourceVideoEl.play();
-
-  await new Promise((resolve) => {
-    if (!sourceVideoEl) {
-      resolve();
-      return;
-    }
-    sourceVideoEl.onended = resolve;
-  });
-
-  if (!cancelRequested && recorder.state !== 'inactive') {
-    recorder.stop();
-    await stopped;
-    resultBlob = new Blob(recordedChunks, { type: resultMimeType });
+  if (!cancelRequested) {
+    muxer.finalize();
+    resultBlob = new Blob([target.buffer], { type: 'video/mp4' });
+    resultMimeType = 'video/mp4';
     const resultUrl = URL.createObjectURL(resultBlob);
     videoResultEl.src = resultUrl;
     videoResultEl.hidden = false;
@@ -423,9 +530,14 @@ async function startVideoProcessing() {
     saveBtnEl.textContent = 'Guardar vídeo';
   }
 
+  finishProcessingUI(true);
+}
+
+function finishProcessingUI(success) {
   videoProgressOverlay.hidden = true;
   chooseAnotherBtnEl.disabled = false;
   saveBtnEl.disabled = false;
+  if (!success) videoStage = 'preview';
   if (wakeLockRef) {
     wakeLockRef.release().catch(() => {});
     wakeLockRef = null;
@@ -438,8 +550,7 @@ videoCancelBtn.addEventListener('click', () => {
 
 async function saveVideoResult() {
   if (!resultBlob) return;
-  const ext = resultMimeType.includes('mp4') ? 'mp4' : 'webm';
-  const fileName = `${resultBaseName}_amelie.${ext}`;
+  const fileName = `${resultBaseName}_amelie.mp4`;
   const file = new File([resultBlob], fileName, { type: resultBlob.type });
 
   if (navigator.canShare && navigator.canShare({ files: [file] })) {

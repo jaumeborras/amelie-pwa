@@ -88,6 +88,11 @@
   </div>
 
   <script src="app.js"></script>
+  <script src="vendor/mp4box.all.min.js"></script>
+  <script type="module">
+    import { Muxer, ArrayBufferTarget } from './vendor/mp4-muxer.mjs';
+    window.MP4Muxer = { Muxer, ArrayBufferTarget };
+  </script>
   <script src="video.js"></script>
 </body>
 </html>
